@@ -1,688 +1,714 @@
--- サービス
+-- Mobile Optimized Combat Control System
+-- モバイル最適化コンバットコントロールシステム
+
+-- メインサービス
 local Players = game:GetService("Players")
 local RunService = game:GetService("RunService")
 local UserInputService = game:GetService("UserInputService")
 local TweenService = game:GetService("TweenService")
-local ContextActionService = game:GetService("ContextActionService")
 local LocalPlayer = Players.LocalPlayer
 local Camera = workspace.CurrentCamera
+local Mouse = LocalPlayer:GetMouse()
 
--- モバイル判定
-local IS_MOBILE = UserInputService.TouchEnabled
+-- タッチ入力用グローバル変数
+local TouchInput = {
+    Active = false,
+    StartPosition = Vector2.new(0, 0),
+    CurrentPosition = Vector2.new(0, 0)
+}
 
--- 設定（GUIから変更可能）
-local Settings = {
+-- 設定（モバイル用に最適化）
+local Config = {
     ESP = {
         Enabled = true,
-        Box = true,
         BoxColor = Color3.fromRGB(0, 255, 0),
-        Tracer = true,
-        Name = true,
-        Distance = true,
-        TeamCheck = true,
-        MaxDistance = 1000
+        TextColor = Color3.fromRGB(255, 255, 255),
+        HealthBar = true,
+        MaxDistance = 500, -- モバイルでは距離を短く
+        UpdateRate = 0.2 -- 更新間隔を長く（パフォーマンス対策）
     },
     
-    Aimbot = {
+    AimAssist = {
         Enabled = false,
-        TouchToAim = IS_MOBILE,
+        FOV = 150, -- モバイルではFOVを小さく
+        Smoothing = 0.15, -- スムージングを強く
         TargetPart = "Head",
-        Smoothness = 0.25,
-        FOV = 80,
-        ShowFOV = true,
-        TeamCheck = true,
         AutoShoot = false,
-        AutoShootDelay = 0.2,
-        Prediction = 0.15
+        TouchZone = UDim2.new(0.6, 0, 0.3, 0, 0.6, 0, 0.6, 0) -- タッチ制御エリア
     },
     
-    Misc = {
-        Crosshair = true,
-        CrosshairSize = IS_MOBILE and 20 or 12,
-        CrosshairColor = Color3.fromRGB(255, 255, 255),
-        NoRecoil = false,
-        RapidFire = false,
-        SpeedHack = false,
-        SpeedMultiplier = 1.5
+    Target = {
+        Mode = "Nearest",
+        Selected = nil,
+        LockDistance = 50 -- ロック距離（ピクセル）
+    },
+    
+    UI = {
+        Scale = 1.2, -- モバイル用にUIを大きく
+        Transparency = 0.8,
+        Position = UDim2.new(0.02, 0, 0.02, 0)
     }
 }
 
--- グローバル変数
-local ESPObjects = {}
-local CurrentTarget = nil
-local GUI = nil
-local Crosshair = nil
-local FOVCircle = nil
-local AutoShootActive = false
-local MobileControls = nil
+-- 状態管理
+local State = {
+    Status = "Ready",
+    LastUpdate = tick(),
+    TargetList = {},
+    VisiblePlayers = {},
+    ESPObjects = {},
+    AimingAt = nil
+}
 
--- ユーティリティ関数
-local function IsTeamMate(player)
-    if not Settings.ESP.TeamCheck then return false end
-    return player.Team == LocalPlayer.Team
-end
-
-local function GetClosestPlayer()
-    local closestDistance = Settings.Aimbot.FOV
-    local closestPlayer = nil
-    local closestPart = nil
+-- モバイルUIの作成
+local function CreateMobileUI()
+    local screenGui = Instance.new("ScreenGui")
+    screenGui.Name = "CombatControlMobile"
+    screenGui.DisplayOrder = 100
+    screenGui.ResetOnSpawn = false
     
-    for _, player in ipairs(Players:GetPlayers()) do
-        if player == LocalPlayer then continue end
-        if IsTeamMate(player) and Settings.Aimbot.TeamCheck then continue end
-        
-        local character = player.Character
-        if not character then continue end
-        
-        local humanoid = character:FindFirstChild("Humanoid")
-        if not humanoid or humanoid.Health <= 0 then continue end
-        
-        local targetPart = character:FindFirstChild(Settings.Aimbot.TargetPart)
-        if not targetPart then continue end
-        
-        local screenPoint, onScreen = Camera:WorldToViewportPoint(targetPart.Position)
-        if not onScreen then continue end
-        
-        local distance = (Vector2.new(screenPoint.X, screenPoint.Y) - 
-                         Vector2.new(Camera.ViewportSize.X / 2, Camera.ViewportSize.Y / 2)).Magnitude
-        
-        if distance < closestDistance then
-            closestDistance = distance
-            closestPlayer = player
-            closestPart = targetPart
-        end
+    -- メインコンテナ
+    local mainFrame = Instance.new("Frame")
+    mainFrame.Name = "MainPanel"
+    mainFrame.Size = UDim2.new(0.3, 0, 0.4, 0)
+    mainFrame.Position = Config.UI.Position
+    mainFrame.BackgroundColor3 = Color3.fromRGB(30, 30, 40)
+    mainFrame.BackgroundTransparency = 0.3
+    mainFrame.BorderSizePixel = 0
+    mainFrame.Parent = screenGui
+    
+    -- タイトル
+    local title = Instance.new("TextLabel")
+    title.Text = "戦闘コントロール"
+    title.Size = UDim2.new(1, 0, 0.1, 0)
+    title.BackgroundColor3 = Color3.fromRGB(50, 50, 70)
+    title.TextColor3 = Color3.fromRGB(255, 255, 255)
+    title.Font = Enum.Font.GothamBold
+    title.TextSize = 18 * Config.UI.Scale
+    title.Parent = mainFrame
+    
+    -- ESPトグルボタン
+    local espButton = Instance.new("TextButton")
+    espButton.Name = "ESPToggle"
+    espButton.Text = "ESP: ON"
+    espButton.Size = UDim2.new(0.45, 0, 0.08, 0)
+    espButton.Position = UDim2.new(0.025, 0, 0.12, 0)
+    espButton.BackgroundColor3 = Color3.fromRGB(0, 150, 0)
+    espButton.TextColor3 = Color3.fromRGB(255, 255, 255)
+    espButton.Font = Enum.Font.Gotham
+    espButton.TextSize = 14 * Config.UI.Scale
+    espButton.Parent = mainFrame
+    
+    -- エイムアシストトグル
+    local aimButton = Instance.new("TextButton")
+    aimButton.Name = "AimToggle"
+    aimButton.Text = "AIM: OFF"
+    aimButton.Size = UDim2.new(0.45, 0, 0.08, 0)
+    aimButton.Position = UDim2.new(0.525, 0, 0.12, 0)
+    aimButton.BackgroundColor3 = Color3.fromRGB(150, 0, 0)
+    aimButton.TextColor3 = Color3.fromRGB(255, 255, 255)
+    aimButton.Font = Enum.Font.Gotham
+    aimButton.TextSize = 14 * Config.UI.Scale
+    aimButton.Parent = mainFrame
+    
+    -- FOVスライダー
+    local fovLabel = Instance.new("TextLabel")
+    fovLabel.Text = "FOV: " .. Config.AimAssist.FOV
+    fovLabel.Size = UDim2.new(0.95, 0, 0.06, 0)
+    fovLabel.Position = UDim2.new(0.025, 0, 0.22, 0)
+    fovLabel.BackgroundTransparency = 1
+    fovLabel.TextColor3 = Color3.fromRGB(200, 200, 200)
+    fovLabel.Font = Enum.Font.Gotham
+    fovLabel.TextSize = 14 * Config.UI.Scale
+    fovLabel.Name = "FOVLabel"
+    fovLabel.Parent = mainFrame
+    
+    local fovSlider = Instance.new("Frame")
+    fovSlider.Name = "FOVSlider"
+    fovSlider.Size = UDim2.new(0.95, 0, 0.03, 0)
+    fovSlider.Position = UDim2.new(0.025, 0, 0.28, 0)
+    fovSlider.BackgroundColor3 = Color3.fromRGB(80, 80, 80)
+    fovSlider.BorderSizePixel = 0
+    fovSlider.Parent = mainFrame
+    
+    local fovFill = Instance.new("Frame")
+    fovFill.Name = "FOVFill"
+    fovFill.Size = UDim2.new(Config.AimAssist.FOV / 300, 0, 1, 0)
+    fovFill.BackgroundColor3 = Color3.fromRGB(0, 150, 255)
+    fovFill.BorderSizePixel = 0
+    fovFill.Parent = fovSlider
+    
+    -- ターゲットモード
+    local targetLabel = Instance.new("TextLabel")
+    targetLabel.Text = "ターゲットモード:"
+    targetLabel.Size = UDim2.new(0.95, 0, 0.05, 0)
+    targetLabel.Position = UDim2.new(0.025, 0, 0.33, 0)
+    targetLabel.BackgroundTransparency = 1
+    targetLabel.TextColor3 = Color3.fromRGB(200, 200, 200)
+    targetLabel.Font = Enum.Font.Gotham
+    targetLabel.TextSize = 13 * Config.UI.Scale
+    targetLabel.Parent = mainFrame
+    
+    local nearestButton = Instance.new("TextButton")
+    nearestButton.Name = "NearestMode"
+    nearestButton.Text = "最接近"
+    nearestButton.Size = UDim2.new(0.45, 0, 0.06, 0)
+    nearestButton.Position = UDim2.new(0.025, 0, 0.39, 0)
+    nearestButton.BackgroundColor3 = Color3.fromRGB(0, 100, 200)
+    nearestButton.TextColor3 = Color3.fromRGB(255, 255, 255)
+    nearestButton.Font = Enum.Font.Gotham
+    nearestButton.TextSize = 12 * Config.UI.Scale
+    nearestButton.Parent = mainFrame
+    
+    local selectedButton = Instance.new("TextButton")
+    selectedButton.Name = "SelectedMode"
+    selectedButton.Text = "手動選択"
+    selectedButton.Size = UDim2.new(0.45, 0, 0.06, 0)
+    selectedButton.Position = UDim2.new(0.525, 0, 0.39, 0)
+    selectedButton.BackgroundColor3 = Color3.fromRGB(80, 80, 80)
+    selectedButton.TextColor3 = Color3.fromRGB(200, 200, 200)
+    selectedButton.Font = Enum.Font.Gotham
+    selectedButton.TextSize = 12 * Config.UI.Scale
+    selectedButton.Parent = mainFrame
+    
+    -- プレイヤーリスト（スクロール）
+    local listFrame = Instance.new("Frame")
+    listFrame.Name = "PlayerList"
+    listFrame.Size = UDim2.new(0.95, 0, 0.35, 0)
+    listFrame.Position = UDim2.new(0.025, 0, 0.48, 0)
+    listFrame.BackgroundColor3 = Color3.fromRGB(40, 40, 50)
+    listFrame.BorderSizePixel = 0
+    listFrame.ClipsDescendants = true
+    listFrame.Parent = mainFrame
+    
+    local uiListLayout = Instance.new("UIListLayout")
+    uiListLayout.Padding = UDim.new(0, 2)
+    uiListLayout.Parent = listFrame
+    
+    -- ステータス表示
+    local statusLabel = Instance.new("TextLabel")
+    statusLabel.Name = "StatusLabel"
+    statusLabel.Text = "状態: " .. State.Status
+    statusLabel.Size = UDim2.new(0.95, 0, 0.06, 0)
+    statusLabel.Position = UDim2.new(0.025, 0, 0.85, 0)
+    statusLabel.BackgroundTransparency = 1
+    statusLabel.TextColor3 = Color3.fromRGB(0, 255, 0)
+    statusLabel.Font = Enum.Font.GothamBold
+    statusLabel.TextSize = 14 * Config.UI.Scale
+    statusLabel.Parent = mainFrame
+    
+    -- タッチエイムゾーン（透明なボタン）
+    local aimZone = Instance.new("TextButton")
+    aimZone.Name = "AimZone"
+    aimZone.Text = ""
+    aimZone.Size = UDim2.new(0.4, 0, 0.4, 0)
+    aimZone.Position = UDim2.new(0.6, 0, 0.3, 0)
+    aimZone.BackgroundTransparency = 0.9
+    aimZone.BackgroundColor3 = Color3.fromRGB(255, 255, 255)
+    aimZone.BorderSizePixel = 0
+    aimZone.Parent = screenGui
+    
+    -- UIイベントハンドラ
+    espButton.MouseButton1Click:Connect(function()
+        Config.ESP.Enabled = not Config.ESP.Enabled
+        espButton.Text = "ESP: " .. (Config.ESP.Enabled and "ON" or "OFF")
+        espButton.BackgroundColor3 = Config.ESP.Enabled and Color3.fromRGB(0, 150, 0) or Color3.fromRGB(150, 0, 0)
+    end)
+    
+    aimButton.MouseButton1Click:Connect(function()
+        Config.AimAssist.Enabled = not Config.AimAssist.Enabled
+        aimButton.Text = "AIM: " .. (Config.AimAssist.Enabled and "ON" or "OFF")
+        aimButton.BackgroundColor3 = Config.AimAssist.Enabled and Color3.fromRGB(0, 150, 0) or Color3.fromRGB(150, 0, 0)
+    end)
+    
+    nearestButton.MouseButton1Click:Connect(function()
+        Config.Target.Mode = "Nearest"
+        nearestButton.BackgroundColor3 = Color3.fromRGB(0, 100, 200)
+        selectedButton.BackgroundColor3 = Color3.fromRGB(80, 80, 80)
+    end)
+    
+    selectedButton.MouseButton1Click:Connect(function()
+        Config.Target.Mode = "Selected"
+        nearestButton.BackgroundColor3 = Color3.fromRGB(80, 80, 80)
+        selectedButton.BackgroundColor3 = Color3.fromRGB(0, 100, 200)
+    end)
+    
+    -- FOVスライダー用タッチハンドリング
+    local function updateFOV(value)
+        Config.AimAssist.FOV = math.clamp(value, 50, 300)
+        fovLabel.Text = "FOV: " .. Config.AimAssist.FOV
+        fovFill.Size = UDim2.new(Config.AimAssist.FOV / 300, 0, 1, 0)
     end
     
-    return closestPlayer, closestPart
-end
-
--- Aimbot機能
-local function AimAt(targetPart)
-    if not targetPart then return end
-    
-    local targetPosition = targetPart.Position
-    
-    -- 予測機能
-    if Settings.Aimbot.Prediction > 0 then
-        local character = targetPart.Parent
-        local humanoidRootPart = character:FindFirstChild("HumanoidRootPart")
-        if humanoidRootPart then
-            targetPosition = targetPosition + (humanoidRootPart.Velocity * Settings.Aimbot.Prediction)
+    fovSlider.InputBegan:Connect(function(input)
+        if input.UserInputType == Enum.UserInputType.Touch or input.UserInputType == Enum.UserInputType.MouseButton1 then
+            local xPos = input.Position.X - fovSlider.AbsolutePosition.X
+            local percent = math.clamp(xPos / fovSlider.AbsoluteSize.X, 0, 1)
+            updateFOV(percent * 300)
         end
-    end
+    end)
     
-    -- スムージング
-    local cameraCFrame = Camera.CFrame
-    local toTarget = (targetPosition - cameraCFrame.Position).Unit
-    local lookVector = cameraCFrame.LookVector
-    
-    local newLook = lookVector:Lerp(toTarget, 1 - Settings.Aimbot.Smoothness)
-    Camera.CFrame = CFrame.new(cameraCFrame.Position, cameraCFrame.Position + newLook)
-end
-
--- ESP機能
-local function CreateESP(player)
-    if player == LocalPlayer then return end
-    
-    local highlight = Instance.new("Highlight")
-    highlight.Name = "ESP_" .. player.Name
-    highlight.FillColor = Settings.ESP.BoxColor
-    highlight.OutlineColor = Color3.fromRGB(255, 255, 255)
-    highlight.FillTransparency = 0.7
-    highlight.DepthMode = Enum.HighlightDepthMode.AlwaysOnTop
-    
-    ESPObjects[player] = highlight
-    
-    -- キャラクターにアタッチ
-    local function attachESP()
-        if player.Character then
-            highlight.Adornee = player.Character
-            highlight.Enabled = Settings.ESP.Enabled and not (IsTeamMate(player) and Settings.ESP.TeamCheck)
-            highlight.Parent = player.Character
+    fovSlider.InputChanged:Connect(function(input)
+        if input.UserInputType == Enum.UserInputType.Touch or input.UserInputType == Enum.UserInputType.MouseMovement then
+            if input.UserInputState == Enum.UserInputState.Change then
+                local xPos = input.Position.X - fovSlider.AbsolutePosition.X
+                local percent = math.clamp(xPos / fovSlider.AbsoluteSize.X, 0, 1)
+                updateFOV(percent * 300)
+            end
         end
-    end
+    end)
     
-    attachESP()
-    player.CharacterAdded:Connect(attachESP)
-    
-    return highlight
-end
-
-local function UpdateESP()
-    for player, highlight in pairs(ESPObjects) do
-        if player.Character and highlight.Adornee ~= player.Character then
-            highlight.Adornee = player.Character
-            highlight.Parent = player.Character
-        end
-        
-        highlight.Enabled = Settings.ESP.Enabled and not (IsTeamMate(player) and Settings.ESP.TeamCheck)
-        
-        if Settings.ESP.Enabled then
-            local distance = (Camera.CFrame.Position - player.Character:GetPivot().Position).Magnitude
-            highlight.Enabled = distance <= Settings.ESP.MaxDistance
-        end
-    end
-end
-
--- クロスヘア
-local function CreateCrosshair()
-    if Crosshair then Crosshair:Remove() end
-    
-    Crosshair = Drawing.new("Square")
-    Crosshair.Visible = Settings.Misc.Crosshair
-    Crosshair.Color = Settings.Misc.CrosshairColor
-    Crosshair.Thickness = 2
-    Crosshair.Size = Vector2.new(Settings.Misc.CrosshairSize, Settings.Misc.CrosshairSize)
-    Crosshair.Filled = true
-    Crosshair.Position = Vector2.new(
-        Camera.ViewportSize.X / 2 - Settings.Misc.CrosshairSize / 2,
-        Camera.ViewportSize.Y / 2 - Settings.Misc.CrosshairSize / 2
-    )
-end
-
--- FOV円
-local function CreateFOVCircle()
-    if FOVCircle then FOVCircle:Remove() end
-    
-    FOVCircle = Drawing.new("Circle")
-    FOVCircle.Visible = Settings.Aimbot.ShowFOV
-    FOVCircle.Color = Color3.fromRGB(255, 255, 255)
-    FOVCircle.Thickness = 1
-    FOVCircle.NumSides = 32
-    FOVCircle.Radius = Settings.Aimbot.FOV
-    FOVCircle.Filled = false
-    FOVCircle.Position = Vector2.new(Camera.ViewportSize.X / 2, Camera.ViewportSize.Y / 2)
-end
-
--- GUI作成（スマホ対応）
-local function CreateGUI()
-    local ScreenGui = Instance.new("ScreenGui")
-    ScreenGui.Name = "FPS_Mobile_Suite"
-    ScreenGui.ResetOnSpawn = false
-    ScreenGui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
-    
-    -- メインフレーム（スマホ用に最適化）
-    local MainFrame = Instance.new("Frame")
-    MainFrame.Name = "MainFrame"
-    MainFrame.Size = IS_MOBILE and UDim2.new(0, 350, 0, 500) or UDim2.new(0, 400, 0, 500)
-    MainFrame.Position = IS_MOBILE and UDim2.new(0.02, 0, 0.3, 0) or UDim2.new(0.05, 0, 0.3, 0)
-    MainFrame.BackgroundColor3 = Color3.fromRGB(30, 30, 35)
-    MainFrame.BackgroundTransparency = 0.1
-    MainFrame.BorderSizePixel = 0
-    MainFrame.ClipsDescendants = true
-    
-    local UICorner = Instance.new("UICorner")
-    UICorner.CornerRadius = UDim.new(0, 8)
-    UICorner.Parent = MainFrame
-    
-    -- タイトルバー
-    local TitleBar = Instance.new("Frame")
-    TitleBar.Name = "TitleBar"
-    TitleBar.Size = UDim2.new(1, 0, 0, 40)
-    TitleBar.BackgroundColor3 = Color3.fromRGB(20, 20, 25)
-    TitleBar.BorderSizePixel = 0
-    
-    local TitleLabel = Instance.new("TextLabel")
-    TitleLabel.Name = "TitleLabel"
-    TitleLabel.Size = UDim2.new(0.7, 0, 1, 0)
-    TitleLabel.Position = UDim2.new(0.05, 0, 0, 0)
-    TitleLabel.BackgroundTransparency = 1
-    TitleLabel.Text = "📱 FPS Mobile Suite"
-    TitleLabel.TextColor3 = Color3.fromRGB(255, 255, 255)
-    TitleLabel.Font = Enum.Font.GothamBold
-    TitleLabel.TextSize = IS_MOBILE and 14 or 16
-    
-    local ToggleButton = Instance.new("TextButton")
-    ToggleButton.Name = "ToggleButton"
-    ToggleButton.Size = IS_MOBILE and UDim2.new(0, 60, 0, 30) or UDim2.new(0, 30, 0, 30)
-    ToggleButton.Position = UDim2.new(1, -70, 0, 5)
-    ToggleButton.BackgroundColor3 = Color3.fromRGB(40, 40, 45)
-    ToggleButton.Text = "−"
-    ToggleButton.TextColor3 = Color3.fromRGB(255, 255, 255)
-    ToggleButton.Font = Enum.Font.GothamBold
-    ToggleButton.TextSize = 20
-    
-    -- コンテンツフレーム
-    local ContentFrame = Instance.new("ScrollingFrame")
-    ContentFrame.Name = "ContentFrame"
-    ContentFrame.Size = UDim2.new(1, 0, 1, -50)
-    ContentFrame.Position = UDim2.new(0, 0, 0, 50)
-    ContentFrame.BackgroundTransparency = 1
-    ContentFrame.CanvasSize = UDim2.new(0, 0, 0, 800)
-    ContentFrame.ScrollBarThickness = 3
-    
-    -- タッチしやすい大きなボタンを作成する関数
-    local function CreateMobileToggle(name, settingCategory, settingKey, default, yPosition)
-        local toggleFrame = Instance.new("Frame")
-        toggleFrame.Size = UDim2.new(0.9, 0, 0, IS_MOBILE and 50 or 40)
-        toggleFrame.Position = UDim2.new(0.05, 0, 0, yPosition)
-        toggleFrame.BackgroundColor3 = Color3.fromRGB(40, 40, 45)
-        toggleFrame.BorderSizePixel = 0
-        
-        local toggleCorner = Instance.new("UICorner")
-        toggleCorner.CornerRadius = UDim.new(0, 6)
-        toggleCorner.Parent = toggleFrame
-        
-        local toggleLabel = Instance.new("TextLabel")
-        toggleLabel.Size = UDim2.new(0.7, 0, 1, 0)
-        toggleLabel.BackgroundTransparency = 1
-        toggleLabel.Text = name
-        toggleLabel.TextColor3 = Color3.fromRGB(255, 255, 255)
-        toggleLabel.Font = Enum.Font.Gotham
-        toggleLabel.TextSize = IS_MOBILE and 14 or 12
-        toggleLabel.TextXAlignment = Enum.TextXAlignment.Left
-        toggleLabel.Position = UDim2.new(0.05, 0, 0, 0)
-        
-        local toggleButton = Instance.new("TextButton")
-        toggleButton.Size = IS_MOBILE and UDim2.new(0, 60, 0, 30) or UDim2.new(0, 50, 0, 25)
-        toggleButton.Position = UDim2.new(1, -70, 0.5, -15)
-        toggleButton.BackgroundColor3 = default and Color3.fromRGB(0, 170, 255) or Color3.fromRGB(60, 60, 65)
-        toggleButton.Text = default and "ON" or "OFF"
-        toggleButton.TextColor3 = Color3.fromRGB(255, 255, 255)
-        toggleButton.Font = Enum.Font.GothamBold
-        toggleButton.TextSize = IS_MOBILE and 12 or 10
-        
-        local buttonCorner = Instance.new("UICorner")
-        buttonCorner.CornerRadius = UDim.new(0, 4)
-        buttonCorner.Parent = toggleButton
-        
-        -- 設定を更新する関数
-        local function updateToggle()
-            local currentValue = Settings[settingCategory][settingKey]
-            toggleButton.Text = currentValue and "ON" or "OFF"
-            toggleButton.BackgroundColor3 = currentValue and Color3.fromRGB(0, 170, 255) or Color3.fromRGB(60, 60, 65)
-        end
-        
-        -- 初期値設定
-        Settings[settingCategory][settingKey] = Settings[settingCategory][settingKey] or default
-        updateToggle()
-        
-        -- クリックイベント
-        toggleButton.MouseButton1Click:Connect(function()
-            Settings[settingCategory][settingKey] = not Settings[settingCategory][settingKey]
-            updateToggle()
+    -- タッチエイムゾーンの処理
+    aimZone.InputBegan:Connect(function(input)
+        if input.UserInputType == Enum.UserInputType.Touch then
+            TouchInput.Active = true
+            TouchInput.StartPosition = Vector2.new(input.Position.X, input.Position.Y)
+            TouchInput.CurrentPosition = TouchInput.StartPosition
             
-            -- 特定の設定に対する特別な処理
-            if settingKey == "Crosshair" then
-                if Crosshair then
-                    Crosshair.Visible = Settings.Misc.Crosshair
+            if Config.AimAssist.Enabled and Config.AimAssist.AutoShoot then
+                -- 自動射撃のロジック（必要に応じて実装）
+            end
+        end
+    end)
+    
+    aimZone.InputChanged:Connect(function(input)
+        if input.UserInputType == Enum.UserInputType.Touch and TouchInput.Active then
+            TouchInput.CurrentPosition = Vector2.new(input.Position.X, input.Position.Y)
+        end
+    end)
+    
+    aimZone.InputEnded:Connect(function(input)
+        if input.UserInputType == Enum.UserInputType.Touch then
+            TouchInput.Active = false
+        end
+    end)
+    
+    screenGui.Parent = LocalPlayer:WaitForChild("PlayerGui")
+    
+    return {
+        ScreenGui = screenGui,
+        UpdateStatus = function(status)
+            State.Status = status
+            statusLabel.Text = "状態: " .. status
+            
+            -- 色を変更
+            if status == "Ready" then
+                statusLabel.TextColor3 = Color3.fromRGB(0, 255, 0)
+            elseif status == "Aiming" then
+                statusLabel.TextColor3 = Color3.fromRGB(255, 255, 0)
+            elseif status == "Locked" then
+                statusLabel.TextColor3 = Color3.fromRGB(255, 0, 0)
+            elseif status == "Error" then
+                statusLabel.TextColor3 = Color3.fromRGB(255, 50, 50)
+            end
+        end,
+        
+        UpdatePlayerList = function(players)
+            -- 既存のアイテムをクリア
+            for _, child in pairs(listFrame:GetChildren()) do
+                if child:IsA("TextButton") then
+                    child:Destroy()
                 end
-            elseif settingKey == "ShowFOV" then
-                if FOVCircle then
-                    FOVCircle.Visible = Settings.Aimbot.ShowFOV
+            end
+            
+            -- 新しいプレイヤーリストを追加
+            for _, player in pairs(players) do
+                if player ~= LocalPlayer then
+                    local button = Instance.new("TextButton")
+                    button.Text = player.Name
+                    button.Size = UDim2.new(1, -10, 0, 30 * Config.UI.Scale)
+                    button.Position = UDim2.new(0, 5, 0, 0)
+                    button.BackgroundColor3 = Color3.fromRGB(60, 60, 70)
+                    button.TextColor3 = Color3.fromRGB(200, 200, 200)
+                    button.Font = Enum.Font.Gotham
+                    button.TextSize = 12 * Config.UI.Scale
+                    button.Parent = listFrame
+                    
+                    button.MouseButton1Click:Connect(function()
+                        Config.Target.Selected = player
+                        Config.Target.Mode = "Selected"
+                        nearestButton.BackgroundColor3 = Color3.fromRGB(80, 80, 80)
+                        selectedButton.BackgroundColor3 = Color3.fromRGB(0, 100, 200)
+                    end)
                 end
             end
-        end)
-        
-        -- タッチイベント（モバイル用）
-        if IS_MOBILE then
-            toggleFrame.InputBegan:Connect(function(input)
-                if input.UserInputType == Enum.UserInputType.Touch then
-                    Settings[settingCategory][settingKey] = not Settings[settingCategory][settingKey]
-                    updateToggle()
-                end
-            end)
         end
-        
-        toggleLabel.Parent = toggleFrame
-        toggleButton.Parent = toggleFrame
-        toggleFrame.Parent = ContentFrame
-        
-        return toggleFrame
-    end
-    
-    -- スライダー作成関数
-    local function CreateMobileSlider(name, settingCategory, settingKey, min, max, default, yPosition)
-        local sliderFrame = Instance.new("Frame")
-        sliderFrame.Size = UDim2.new(0.9, 0, 0, IS_MOBILE and 70 or 60)
-        sliderFrame.Position = UDim2.new(0.05, 0, 0, yPosition)
-        sliderFrame.BackgroundTransparency = 1
-        
-        local sliderLabel = Instance.new("TextLabel")
-        sliderLabel.Size = UDim2.new(1, 0, 0, 20)
-        sliderLabel.BackgroundTransparency = 1
-        sliderLabel.Text = name .. ": " .. tostring(Settings[settingCategory][settingKey] or default)
-        sliderLabel.TextColor3 = Color3.fromRGB(255, 255, 255)
-        sliderLabel.Font = Enum.Font.Gotham
-        sliderLabel.TextSize = IS_MOBILE and 14 or 12
-        sliderLabel.TextXAlignment = Enum.TextXAlignment.Left
-        
-        local sliderBar = Instance.new("Frame")
-        sliderBar.Size = UDim2.new(1, 0, 0, 10)
-        sliderBar.Position = UDim2.new(0, 0, 0, 30)
-        sliderBar.BackgroundColor3 = Color3.fromRGB(60, 60, 65)
-        sliderBar.BorderSizePixel = 0
-        
-        local sliderCorner = Instance.new("UICorner")
-        sliderCorner.CornerRadius = UDim.new(0, 5)
-        sliderCorner.Parent = sliderBar
-        
-        local sliderFill = Instance.new("Frame")
-        sliderFill.Size = UDim2.new(
-            ((Settings[settingCategory][settingKey] or default) - min) / (max - min), 
-            0, 1, 0
-        )
-        sliderFill.BackgroundColor3 = Color3.fromRGB(0, 170, 255)
-        sliderFill.BorderSizePixel = 0
-        
-        local fillCorner = Instance.new("UICorner")
-        fillCorner.CornerRadius = UDim.new(0, 5)
-        fillCorner.Parent = sliderFill
-        
-        sliderFill.Parent = sliderBar
-        
-        -- スライダー制御
-        local dragging = false
-        
-        local function updateSlider(value)
-            local clampedValue = math.clamp(value, min, max)
-            Settings[settingCategory][settingKey] = clampedValue
-            sliderLabel.Text = name .. ": " .. tostring(math.floor(clampedValue * 10) / 10)
-            sliderFill.Size = UDim2.new((clampedValue - min) / (max - min), 0, 1, 0)
-        end
-        
-        -- スライダーのインタラクション
-        local function onInput(input)
-            local relativeX = (input.Position.X - sliderBar.AbsolutePosition.X) / sliderBar.AbsoluteSize.X
-            relativeX = math.clamp(relativeX, 0, 1)
-            local value = min + (max - min) * relativeX
-            updateSlider(value)
-        end
-        
-        sliderBar.InputBegan:Connect(function(input)
-            if input.UserInputType == Enum.UserInputType.MouseButton1 or 
-               input.UserInputType == Enum.UserInputType.Touch then
-                dragging = true
-                onInput(input)
-            end
-        end)
-        
-        sliderBar.InputChanged:Connect(function(input)
-            if dragging and (input.UserInputType == Enum.UserInputType.MouseMovement or 
-               input.UserInputType == Enum.UserInputType.Touch) then
-                onInput(input)
-            end
-        end)
-        
-        UserInputService.InputEnded:Connect(function(input)
-            if input.UserInputType == Enum.UserInputType.MouseButton1 or 
-               input.UserInputType == Enum.UserInputType.Touch then
-                dragging = false
-            end
-        end)
-        
-        -- 初期値設定
-        updateSlider(Settings[settingCategory][settingKey] or default)
-        
-        sliderLabel.Parent = sliderFrame
-        sliderBar.Parent = sliderFrame
-        sliderFrame.Parent = ContentFrame
-        
-        return sliderFrame
-    end
-    
-    -- 各種コントロールを追加
-    local yOffset = 0
-    local spacing = IS_MOBILE and 60 or 50
-    
-    -- ESP セクション
-    local espLabel = Instance.new("TextLabel")
-    espLabel.Size = UDim2.new(0.9, 0, 0, 30)
-    espLabel.Position = UDim2.new(0.05, 0, 0, yOffset)
-    espLabel.BackgroundTransparency = 1
-    espLabel.Text = "👁️ ESP SETTINGS"
-    espLabel.TextColor3 = Color3.fromRGB(0, 170, 255)
-    espLabel.Font = Enum.Font.GothamBold
-    espLabel.TextSize = IS_MOBILE and 16 or 14
-    espLabel.Parent = ContentFrame
-    yOffset = yOffset + 35
-    
-    CreateMobileToggle("ESP Enabled", "ESP", "Enabled", true, yOffset)
-    yOffset = yOffset + spacing
-    
-    CreateMobileToggle("Box ESP", "ESP", "Box", true, yOffset)
-    yOffset = yOffset + spacing
-    
-    CreateMobileToggle("Show Names", "ESP", "Name", true, yOffset)
-    yOffset = yOffset + spacing
-    
-    CreateMobileToggle("Team Check", "ESP", "TeamCheck", true, yOffset)
-    yOffset = yOffset + spacing + 20
-    
-    -- Aimbot セクション
-    local aimbotLabel = Instance.new("TextLabel")
-    aimbotLabel.Size = UDim2.new(0.9, 0, 0, 30)
-    aimbotLabel.Position = UDim2.new(0.05, 0, 0, yOffset)
-    aimbotLabel.BackgroundTransparency = 1
-    aimbotLabel.Text = "🎯 AIMBOT SETTINGS"
-    aimbotLabel.TextColor3 = Color3.fromRGB(0, 170, 255)
-    aimbotLabel.Font = Enum.Font.GothamBold
-    aimbotLabel.TextSize = IS_MOBILE and 16 or 14
-    aimbotLabel.Parent = ContentFrame
-    yOffset = yOffset + 35
-    
-    CreateMobileToggle("Aimbot Enabled", "Aimbot", "Enabled", false, yOffset)
-    yOffset = yOffset + spacing
-    
-    CreateMobileToggle("Auto Shoot", "Aimbot", "AutoShoot", false, yOffset)
-    yOffset = yOffset + spacing
-    
-    CreateMobileToggle("Show FOV Circle", "Aimbot", "ShowFOV", true, yOffset)
-    yOffset = yOffset + spacing
-    
-    CreateMobileSlider("FOV Size", "Aimbot", "FOV", 10, 200, 80, yOffset)
-    yOffset = yOffset + (IS_MOBILE and 80 : 70)
-    
-    CreateMobileSlider("Smoothness", "Aimbot", "Smoothness", 0, 1, 0.25, yOffset)
-    yOffset = yOffset + (IS_MOBILE and 80 : 70) + 20
-    
-    -- その他の設定
-    local miscLabel = Instance.new("TextLabel")
-    miscLabel.Size = UDim2.new(0.9, 0, 0, 30)
-    miscLabel.Position = UDim2.new(0.05, 0, 0, yOffset)
-    miscLabel.BackgroundTransparency = 1
-    miscLabel.Text = "⚙️ OTHER SETTINGS"
-    miscLabel.TextColor3 = Color3.fromRGB(0, 170, 255)
-    miscLabel.Font = Enum.Font.GothamBold
-    miscLabel.TextSize = IS_MOBILE and 16 or 14
-    miscLabel.Parent = ContentFrame
-    yOffset = yOffset + 35
-    
-    CreateMobileToggle("Crosshair", "Misc", "Crosshair", true, yOffset)
-    yOffset = yOffset + spacing
-    
-    CreateMobileToggle("No Recoil", "Misc", "NoRecoil", false, yOffset)
-    yOffset = yOffset + spacing
-    
-    CreateMobileToggle("Rapid Fire", "Misc", "RapidFire", false, yOffset)
-    yOffset = yOffset + spacing
-    
-    -- 親設定
-    TitleLabel.Parent = TitleBar
-    ToggleButton.Parent = TitleBar
-    TitleBar.Parent = MainFrame
-    ContentFrame.Parent = MainFrame
-    MainFrame.Parent = ScreenGui
-    
-    -- ドラッグ機能
-    local dragging = false
-    local dragStart = nil
-    local startPos = nil
-    
-    local function updateInput(input)
-        local delta = input.Position - dragStart
-        MainFrame.Position = UDim2.new(startPos.X.Scale, startPos.X.Offset + delta.X, 
-                                      startPos.Y.Scale, startPos.Y.Offset + delta.Y)
-    end
-    
-    TitleBar.InputBegan:Connect(function(input)
-        if input.UserInputType == Enum.UserInputType.MouseButton1 or 
-           input.UserInputType == Enum.UserInputType.Touch then
-            dragging = true
-            dragStart = input.Position
-            startPos = MainFrame.Position
-        end
-    end)
-    
-    TitleBar.InputChanged:Connect(function(input)
-        if dragging and (input.UserInputType == Enum.UserInputType.MouseMovement or 
-           input.UserInputType == Enum.UserInputType.Touch) then
-            updateInput(input)
-        end
-    end)
-    
-    UserInputService.InputEnded:Connect(function(input)
-        if input.UserInputType == Enum.UserInputType.MouseButton1 or 
-           input.UserInputType == Enum.UserInputType.Touch then
-            dragging = false
-        end
-    end)
-    
-    -- トグルボタン
-    ToggleButton.MouseButton1Click:Connect(function()
-        ContentFrame.Visible = not ContentFrame.Visible
-        if ContentFrame.Visible then
-            MainFrame.Size = IS_MOBILE and UDim2.new(0, 350, 0, 500) or UDim2.new(0, 400, 0, 500)
-            ToggleButton.Text = "−"
-        else
-            MainFrame.Size = UDim2.new(0, MainFrame.Size.X.Offset, 0, 50)
-            ToggleButton.Text = "+"
-        end
-    end)
-    
-    -- モバイル用簡易コントロールを追加
-    if IS_MOBILE then
-        local QuickControls = Instance.new("Frame")
-        QuickControls.Name = "QuickControls"
-        QuickControls.Size = UDim2.new(0, 120, 0, 120)
-        QuickControls.Position = UDim2.new(1, -130, 0.7, 0)
-        QuickControls.BackgroundColor3 = Color3.fromRGB(30, 30, 35)
-        QuickControls.BackgroundTransparency = 0.2
-        QuickControls.BorderSizePixel = 0
-        
-        local quickCorner = Instance.new("UICorner")
-        quickCorner.CornerRadius = UDim.new(0, 8)
-        quickCorner.Parent = QuickControls
-        
-        -- クイックAimbotトグル
-        local quickAimBtn = Instance.new("TextButton")
-        quickAimBtn.Name = "QuickAim"
-        quickAimBtn.Size = UDim2.new(0.8, 0, 0, 40)
-        quickAimBtn.Position = UDim2.new(0.1, 0, 0.1, 0)
-        quickAimBtn.BackgroundColor3 = Settings.Aimbot.Enabled and Color3.fromRGB(0, 170, 255) or Color3.fromRGB(60, 60, 65)
-        quickAimBtn.Text = Settings.Aimbot.Enabled and "AIM: ON" or "AIM: OFF"
-        quickAimBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
-        quickAimBtn.Font = Enum.Font.GothamBold
-        quickAimBtn.TextSize = 12
-        
-        quickAimBtn.MouseButton1Click:Connect(function()
-            Settings.Aimbot.Enabled = not Settings.Aimbot.Enabled
-            quickAimBtn.Text = Settings.Aimbot.Enabled and "AIM: ON" or "AIM: OFF"
-            quickAimBtn.BackgroundColor3 = Settings.Aimbot.Enabled and Color3.fromRGB(0, 170, 255) or Color3.fromRGB(60, 60, 65)
-        end)
-        
-        quickAimBtn.Parent = QuickControls
-        QuickControls.Parent = ScreenGui
-    end
-    
-    ScreenGui.Parent = game.CoreGui
-    return ScreenGui
+    }
 end
 
--- 初期化
-local function Initialize()
-    -- GUI作成
-    GUI = CreateGUI()
+-- ESPシステム（モバイル最適化）
+local function CreateESPSystem()
+    local ESP = {
+        Objects = {},
+        Connections = {}
+    }
     
-    -- ESP初期化
-    for _, player in ipairs(Players:GetPlayers()) do
-        CreateESP(player)
+    -- プレイヤー追加時の処理
+    local function onPlayerAdded(player)
+        if player == LocalPlayer then return end
+        
+        ESP.Objects[player] = {
+            Box = nil,
+            Name = nil,
+            HealthBar = nil,
+            Connection = nil
+        }
+        
+        -- キャラクター追加時の処理
+        local function onCharacterAdded(character)
+            wait(1) -- キャラクターのロードを待つ
+            
+            -- 既存のオブジェクトをクリア
+            if ESP.Objects[player].Box then
+                ESP.Objects[player].Box:Destroy()
+            end
+            if ESP.Objects[player].Name then
+                ESP.Objects[player].Name:Destroy()
+            end
+            if ESP.Objects[player].HealthBar then
+                ESP.Objects[player].HealthBar:Destroy()
+            end
+            
+            -- Drawingオブジェクトを作成
+            local box = Drawing.new("Square")
+            box.Visible = false
+            box.Color = Config.ESP.BoxColor
+            box.Thickness = 1
+            box.Filled = false
+            
+            local name = Drawing.new("Text")
+            name.Visible = false
+            name.Color = Config.ESP.TextColor
+            name.Size = 12 * Config.UI.Scale
+            name.Center = true
+            name.Outline = true
+            
+            local healthBar = Drawing.new("Square")
+            healthBar.Visible = false
+            healthBar.Color = Color3.fromRGB(255, 0, 0)
+            healthBar.Thickness = 1
+            healthBar.Filled = true
+            
+            ESP.Objects[player] = {
+                Box = box,
+                Name = name,
+                HealthBar = healthBar,
+                Character = character
+            }
+        end
+        
+        ESP.Objects[player].Connection = player.CharacterAdded:Connect(onCharacterAdded)
+        
+        if player.Character then
+            onCharacterAdded(player.Character)
+        end
     end
     
-    Players.PlayerAdded:Connect(CreateESP)
-    Players.PlayerRemoving:Connect(function(player)
-        if ESPObjects[player] then
-            ESPObjects[player]:Destroy()
-            ESPObjects[player] = nil
+    -- プレイヤー削除時の処理
+    local function onPlayerRemoving(player)
+        if ESP.Objects[player] then
+            if ESP.Objects[player].Box then
+                ESP.Objects[player].Box:Destroy()
+            end
+            if ESP.Objects[player].Name then
+                ESP.Objects[player].Name:Destroy()
+            end
+            if ESP.Objects[player].HealthBar then
+                ESP.Objects[player].HealthBar:Destroy()
+            end
+            if ESP.Objects[player].Connection then
+                ESP.Objects[player].Connection:Disconnect()
+            end
+            ESP.Objects[player] = nil
         end
-    end)
+    end
     
-    -- 視覚効果作成
-    CreateCrosshair()
-    CreateFOVCircle()
+    -- 初期化
+    for _, player in pairs(Players:GetPlayers()) do
+        onPlayerAdded(player)
+    end
     
-    -- メインループ
-    RunService.RenderStepped:Connect(function()
-        -- ESP更新
-        UpdateESP()
-        
-        -- クロスヘア更新
-        if Crosshair then
-            Crosshair.Visible = Settings.Misc.Crosshair
-            Crosshair.Position = Vector2.new(
-                Camera.ViewportSize.X / 2 - Settings.Misc.CrosshairSize / 2,
-                Camera.ViewportSize.Y / 2 - Settings.Misc.CrosshairSize / 2
-            )
+    Players.PlayerAdded:Connect(onPlayerAdded)
+    Players.PlayerRemoving:Connect(onPlayerRemoving)
+    
+    -- 更新関数
+    function ESP.Update()
+        if not Config.ESP.Enabled then
+            for player, data in pairs(ESP.Objects) do
+                if data.Box then data.Box.Visible = false end
+                if data.Name then data.Name.Visible = false end
+                if data.HealthBar then data.HealthBar.Visible = false end
+            end
+            return
         end
         
-        -- FOV円更新
-        if FOVCircle then
-            FOVCircle.Position = Vector2.new(Camera.ViewportSize.X / 2, Camera.ViewportSize.Y / 2)
-            FOVCircle.Radius = Settings.Aimbot.FOV
-            FOVCircle.Visible = Settings.Aimbot.ShowFOV
-        end
-        
-        -- Aimbot実行
-        if Settings.Aimbot.Enabled then
-            local targetPlayer, targetPart = GetClosestPlayer()
-            if targetPlayer and targetPart then
-                AimAt(targetPart)
-                CurrentTarget = targetPlayer
+        for player, data in pairs(ESP.Objects) do
+            local character = data.Character or player.Character
+            
+            if character and character:FindFirstChild("HumanoidRootPart") then
+                local hrp = character.HumanoidRootPart
+                local humanoid = character:FindFirstChildOfClass("Humanoid")
                 
-                -- 自動射撃
-                if Settings.Aimbot.AutoShoot and LocalPlayer.Character then
-                    local tool = LocalPlayer.Character:FindFirstChildOfClass("Tool")
-                    if tool then
-                        tool:Activate()
-                        task.wait(Settings.Aimbot.AutoShootDelay)
+                -- スクリーン位置を取得
+                local screenPosition, onScreen = Camera:WorldToViewportPoint(hrp.Position)
+                local distance = (hrp.Position - Camera.CFrame.Position).Magnitude
+                
+                if onScreen and distance <= Config.ESP.MaxDistance then
+                    -- サイズを計算（距離に応じて調整）
+                    local scale = 1000 / screenPosition.Z
+                    local width = 3 * scale
+                    local height = 5 * scale
+                    
+                    -- ボックスを更新
+                    data.Box.Size = Vector2.new(width, height)
+                    data.Box.Position = Vector2.new(
+                        screenPosition.X - width/2,
+                        screenPosition.Y - height/2
+                    )
+                    data.Box.Visible = true
+                    
+                    -- 名前を更新
+                    data.Name.Text = player.Name .. " [" .. math.floor(distance) .. "m]"
+                    data.Name.Position = Vector2.new(
+                        screenPosition.X,
+                        screenPosition.Y - height/2 - 15
+                    )
+                    data.Name.Visible = true
+                    
+                    -- ヘルスバーを更新
+                    if humanoid and Config.ESP.HealthBar then
+                        local healthPercent = humanoid.Health / humanoid.MaxHealth
+                        local barHeight = height * healthPercent
+                        local barWidth = 3
+                        
+                        data.HealthBar.Size = Vector2.new(barWidth, barHeight)
+                        data.HealthBar.Position = Vector2.new(
+                            screenPosition.X - width/2 - barWidth - 2,
+                            screenPosition.Y - height/2 + (height - barHeight)
+                        )
+                        
+                        -- ヘルスに応じて色を変更
+                        if healthPercent > 0.5 then
+                            data.HealthBar.Color = Color3.fromRGB(0, 255, 0)
+                        elseif healthPercent > 0.25 then
+                            data.HealthBar.Color = Color3.fromRGB(255, 255, 0)
+                        else
+                            data.HealthBar.Color = Color3.fromRGB(255, 0, 0)
+                        end
+                        
+                        data.HealthBar.Visible = true
+                    else
+                        data.HealthBar.Visible = false
+                    end
+                else
+                    data.Box.Visible = false
+                    data.Name.Visible = false
+                    data.HealthBar.Visible = false
+                end
+            else
+                data.Box.Visible = false
+                data.Name.Visible = false
+                data.HealthBar.Visible = false
+            end
+        end
+    end
+    
+    -- クリーンアップ
+    function ESP.Cleanup()
+        for player, data in pairs(ESP.Objects) do
+            onPlayerRemoving(player)
+        end
+        ESP.Objects = {}
+    end
+    
+    return ESP
+end
+
+-- エイムアシストシステム
+local function CreateAimAssistSystem()
+    local AimAssist = {
+        CurrentTarget = nil,
+        LastUpdate = 0
+    }
+    
+    -- ターゲット取得
+    function AimAssist.GetTarget()
+        if Config.Target.Mode == "Selected" and Config.Target.Selected then
+            local player = Config.Target.Selected
+            if player and player.Character and player.Character:FindFirstChild("HumanoidRootPart") then
+                return player
+            end
+        end
+        
+        -- 最接近ターゲットを取得
+        local closest = nil
+        local closestDistance = Config.AimAssist.FOV
+        
+        for _, player in pairs(Players:GetPlayers()) do
+            if player ~= LocalPlayer and player.Character then
+                local hrp = player.Character:FindFirstChild("HumanoidRootPart")
+                if hrp then
+                    local screenPos, onScreen = Camera:WorldToViewportPoint(hrp.Position)
+                    
+                    if onScreen then
+                        local distance
+                        if TouchInput.Active then
+                            -- タッチ位置からの距離を計算
+                            distance = (Vector2.new(screenPos.X, screenPos.Y) - TouchInput.CurrentPosition).Magnitude
+                        else
+                            -- 画面中央からの距離を計算
+                            distance = (Vector2.new(screenPos.X, screenPos.Y) - Vector2.new(Camera.ViewportSize.X/2, Camera.ViewportSize.Y/2)).Magnitude
+                        end
+                        
+                        if distance < closestDistance then
+                            closestDistance = distance
+                            closest = player
+                        end
                     end
                 end
             end
-        else
-            CurrentTarget = nil
         end
         
-        -- リコイル制御
-        if Settings.Misc.NoRecoil and LocalPlayer.Character then
-            -- リコイル軽減処理
+        return closest
+    end
+    
+    -- ターゲットロック
+    function AimAssist.LockToTarget()
+        if not Config.AimAssist.Enabled then
+            AimAssist.CurrentTarget = nil
+            return
+        end
+        
+        local target = AimAssist.GetTarget()
+        
+        if target and target.Character then
+            local targetPart = target.Character:FindFirstChild(Config.AimAssist.TargetPart) or target.Character:FindFirstChild("HumanoidRootPart")
+            
+            if targetPart then
+                AimAssist.CurrentTarget = target
+                
+                -- カメラの向きをスムーズに変更
+                local currentCFrame = Camera.CFrame
+                local targetPosition = targetPart.Position
+                
+                -- プレディクション（移動予測）
+                local humanoid = target.Character:FindFirstChildOfClass("Humanoid")
+                if humanoid then
+                    targetPosition = targetPosition + (humanoid.MoveDirection * 0.2)
+                end
+                
+                local lookVector = (targetPosition - currentCFrame.Position).Unit
+                local newCFrame = CFrame.new(currentCFrame.Position, currentCFrame.Position + lookVector)
+                
+                -- スムージングを適用
+                Camera.CFrame = currentCFrame:Lerp(newCFrame, Config.AimAssist.Smoothing)
+                
+                return true
+            end
+        end
+        
+        AimAssist.CurrentTarget = nil
+        return false
+    end
+    
+    -- タッチベースのエイム補助
+    function AimAssist.HandleTouchAim()
+        if not TouchInput.Active or not Config.AimAssist.Enabled then
+            return
+        end
+        
+        -- タッチ移動量に基づいてカメラを回転
+        local delta = TouchInput.CurrentPosition - TouchInput.StartPosition
+        local sensitivity = 0.002
+        
+        -- カメラ回転（制限付き）
+        local currentCFrame = Camera.CFrame
+        local rotation = CFrame.fromEulerAnglesYXZ(
+            -delta.Y * sensitivity,
+            -delta.X * sensitivity,
+            0
+        )
+        
+        Camera.CFrame = currentCFrame * rotation
+    end
+    
+    return AimAssist
+end
+
+-- メインループ
+local function Initialize()
+    -- UI作成
+    local MobileUI = CreateMobileUI()
+    
+    -- システム初期化
+    local ESP = CreateESPSystem()
+    local AimAssist = CreateAimAssistSystem()
+    
+    -- プレイヤーリスト更新関数
+    local function UpdatePlayerList()
+        local playerArray = {}
+        for _, player in pairs(Players:GetPlayers()) do
+            if player ~= LocalPlayer then
+                table.insert(playerArray, player)
+            end
+        end
+        MobileUI.UpdatePlayerList(playerArray)
+    end
+    
+    -- メインループ
+    local lastESPCheck = 0
+    local lastAimCheck = 0
+    
+    RunService.RenderStepped:Connect(function(deltaTime)
+        local now = tick()
+        
+        -- ESP更新（パフォーマンス対策で間隔をあける）
+        if now - lastESPCheck >= Config.ESP.UpdateRate then
+            ESP.Update()
+            lastESPCheck = now
+        end
+        
+        -- エイムアシスト更新
+        if now - lastAimCheck >= 0.05 then
+            AimAssist.HandleTouchAim()
+            
+            if Config.AimAssist.Enabled then
+                if AimAssist.LockToTarget() then
+                    MobileUI.UpdateStatus("Locked")
+                else
+                    MobileUI.UpdateStatus("Aiming")
+                end
+            else
+                MobileUI.UpdateStatus("Ready")
+            end
+            
+            lastAimCheck = now
         end
     end)
     
-    -- GUI表示/非表示キー
-    UserInputService.InputBegan:Connect(function(input, processed)
-        if processed then return end
-        
-        if input.KeyCode == Enum.KeyCode.Insert or 
-           (IS_MOBILE and input.UserInputType == Enum.UserInputType.Touch and 
-            input.Position.X < 50 and input.Position.Y < 50) then
-            
-            if GUI and GUI.Parent then
-                GUI.Parent = nil
-            else
-                if not GUI then
-                    GUI = CreateGUI()
-                else
-                    GUI.Parent = game.CoreGui
-                end
-            end
+    -- 初期化
+    UpdatePlayerList()
+    MobileUI.UpdateStatus("Ready")
+    
+    -- プレイヤー接続/切断時の処理
+    Players.PlayerAdded:Connect(UpdatePlayerList)
+    Players.PlayerRemoving:Connect(UpdatePlayerList)
+    
+    -- クリーンアップ関数
+    return function()
+        ESP.Cleanup()
+        if MobileUI.ScreenGui then
+            MobileUI.ScreenGui:Destroy()
         end
-    end)
+    end
 end
 
--- スクリプト開始
-Initialize()
+-- スクリプト実行
+local cleanup = Initialize()
 
--- 通知
-task.wait(1)
-print("📱 Mobile FPS Suite Loaded!")
-print("Insertキーまたは画面左上タップでGUI表示/非表示")
+-- スクリプト終了時のクリーンアップ
+game:GetService("UserInputService").WindowFocusReleased:Connect(function()
+    if cleanup then
+        cleanup()
+    end
+end)
